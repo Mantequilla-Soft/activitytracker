@@ -98,6 +98,22 @@ describe('extractSnapTimestamps', () => {
     expect(events[0].timestamp).toBe(Date.parse(`${timestamp}Z`));
   });
 
+  test('a matching comment sets events[0].author to the comment author', () => {
+    const block = makeBlock([
+      ['comment', { parent_author: 'peak.snaps', permlink: 'my-snap', author: 'alice', body: 'hi' }],
+    ]);
+    const events = extractSnapTimestamps(block);
+    expect(events[0].author).toBe('alice');
+  });
+
+  test('a matching comment with no string author field sets events[0].author to null', () => {
+    const block = makeBlock([
+      ['comment', { parent_author: 'peak.snaps', permlink: 'my-snap', body: 'hi' }],
+    ]);
+    const events = extractSnapTimestamps(block);
+    expect(events[0].author).toBeNull();
+  });
+
   test('an edited snap (same author/permlink re-broadcast) yields two events with identical keys', () => {
     const block = makeBlock([
       ['comment', { parent_author: 'peak.snaps', permlink: 'my-snap', author: 'alice', body: 'original' }],

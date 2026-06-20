@@ -2,7 +2,7 @@
 
 const express = require('express');
 
-function createServer(state, snapLog) {
+function createServer(state, snapLog, authorTally) {
   const app = express();
 
   app.get('/active-users', (req, res) => {
@@ -31,6 +31,14 @@ function createServer(state, snapLog) {
       serverTime: new Date().toISOString(),
       warming: state.warming,
     });
+  });
+
+  app.get('/trending-authors', (req, res) => {
+    const requested = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(requested) ? Math.max(1, Math.min(requested, 50)) : 20;
+
+    const authors = state.warming || !authorTally ? [] : authorTally.top(limit);
+    res.json({ authors, warming: state.warming });
   });
 
   app.get('/health', (req, res) => {

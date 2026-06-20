@@ -21,10 +21,11 @@ index.js           — entry point, wires everything together
 hive-client.js     — beacon node discovery, dhive client, 60-min node refresh
 rolling-window.js  — in-memory Map with upsert + evict logic
 snap-window.js     — append-only event log for new-snap counting, dedupes edits
+author-tally.js    — per-author snap counts for trending-authors suggestions
 poller.js          — block fetching loop, account extraction, snap detection
 server.js          — Express HTTP server (localhost only)
 ecosystem.config.js— PM2 process config
-tests/             — Jest test suite (40 tests)
+tests/             — Jest test suite (57 tests)
 ```
 
 ---
@@ -58,6 +59,19 @@ The sidecar binds to `127.0.0.1:3099` only — never exposed to the public inter
 - `warming` — `true` while the cold-start bulk fetch is in progress; `count` is `0` until it
   clears.
 - `400` if `since` is missing or unparseable.
+
+### `GET /trending-authors?limit=<n>`
+
+```json
+{ "authors": [{ "account": "alice", "count": 12 }, { "account": "bob", "count": 9 }], "warming": false }
+```
+
+- `authors` — accounts that authored snaps in the last 24h (configurable via
+  `TRENDING_AUTHORS_WINDOW_MS`), sorted by count descending. A coarse "who's active" signal — no
+  personalization or follow-status filtering happens here; the frontend does that.
+- `limit` — optional, 1–50, default 20.
+- `warming` — `true` while the cold-start bulk fetch is in progress; `authors` is `[]` until it
+  clears.
 
 ### `GET /health`
 
@@ -116,6 +130,7 @@ All options are set via environment variables. See `.env.example` for the full l
 | `BEACON_API_URL` | `https://beacon.peakd.com/api/nodes` | Node discovery endpoint |
 | `SNAP_CONTAINER_AUTHOR` | `peak.snaps` | Account whose top-level replies count as "snaps" |
 | `SNAP_RETENTION_MS` | `3600000` | How long to retain snap event timestamps (ms) |
+| `TRENDING_AUTHORS_WINDOW_MS` | `86400000` | How long to retain per-author snap counts (ms) |
 
 ---
 

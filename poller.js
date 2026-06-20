@@ -56,7 +56,8 @@ function extractSnapTimestamps(block) {
   walkOperations(block, (payload) => {
     if (payload.parent_author === SNAP_CONTAINER_AUTHOR && typeof payload.permlink === 'string') {
       const key = typeof payload.author === 'string' ? `${payload.author}/${payload.permlink}` : null;
-      events.push({ timestamp: blockTime, key });
+      const author = typeof payload.author === 'string' ? payload.author : null;
+      events.push({ timestamp: blockTime, key, author });
     }
   });
   return events;
@@ -82,7 +83,7 @@ async function fetchBlockRange(client, from, to) {
   }
 }
 
-async function coldStart(client, window, snapLog) {
+async function coldStart(client, window, snapLog, authorTally) {
   console.log('[hive-sidecar] Starting bulk cold-start fetch…');
   const props = await client.database.getDynamicGlobalProperties();
   const head = props.head_block_number;
@@ -94,8 +95,11 @@ async function coldStart(client, window, snapLog) {
     for (const block of blocks) {
       const accounts = extractAccounts(block);
       for (const account of accounts) window.upsert(account);
-      if (snapLog) {
-        for (const evt of extractSnapTimestamps(block)) snapLog.record(evt.timestamp, evt.key);
+      if (snapLog || authorTally) {
+        for (const evt of extractSnapTimestamps(block)) {
+          if (snapLog) snapLog.record(evt.timestamp, evt.key);
+          if (authorTally && evt.author) authorTally.record(evt.author, evt.timestamp);
+        }
       }
     }
   }
@@ -104,7 +108,7 @@ async function coldStart(client, window, snapLog) {
   return head;
 }
 
-function startPollLoop(client, window, state, snapLog) {
+function startPollLoop(client, window, state, snapLog, authorTally) {
   let consecutiveFailures = 0;
 
   const tick = async () => {
@@ -120,13 +124,17 @@ function startPollLoop(client, window, state, snapLog) {
       for (const block of blocks) {
         const accounts = extractAccounts(block);
         for (const account of accounts) window.upsert(account);
-        if (snapLog) {
-          for (const evt of extractSnapTimestamps(block)) snapLog.record(evt.timestamp, evt.key);
+        if (snapLog || authorTally) {
+          for (const evt of extractSnapTimestamps(block)) {
+            if (snapLog) snapLog.record(evt.timestamp, evt.key);
+            if (authorTally && evt.author) authorTally.record(evt.author, evt.timestamp);
+          }
         }
       }
 
       window.evict();
       if (snapLog) snapLog.evict();
+      if (authorTally) authorTally.evict();
       state.lastProcessedBlock = head;
       state.updatedAt = new Date().toISOString();
       consecutiveFailures = 0;
