@@ -20,10 +20,11 @@ Hive produces a block every ~3 seconds. On startup the sidecar bulk-fetches the 
 index.js           — entry point, wires everything together
 hive-client.js     — beacon node discovery, dhive client, 60-min node refresh
 rolling-window.js  — in-memory Map with upsert + evict logic
-poller.js          — block fetching loop and account extraction
+snap-window.js     — append-only event log for new-snap counting, dedupes edits
+poller.js          — block fetching loop, account extraction, snap detection
 server.js          — Express HTTP server (localhost only)
 ecosystem.config.js— PM2 process config
-tests/             — Jest test suite (21 tests)
+tests/             — Jest test suite (40 tests)
 ```
 
 ---
@@ -41,6 +42,22 @@ The sidecar binds to `127.0.0.1:3099` only — never exposed to the public inter
 - `count` — distinct accounts active in the last 30 minutes. `null` during warm-up.
 - `warming` — `true` while the cold-start bulk fetch is in progress.
 - `updatedAt` — ISO timestamp of the last successful poll tick.
+
+### `GET /new-snaps?since=<epoch-ms-or-ISO-8601>`
+
+```json
+{ "count": 3, "latestTimestamp": "2026-06-19T18:32:10.000Z", "serverTime": "2026-06-19T18:32:40.000Z", "warming": false }
+```
+
+- `count` — number of new top-level replies to `peak.snaps` since `since`. An upper bound, not
+  an exact preview (the frontend applies its own tag/mute filtering on top). Edits of an
+  existing snap are deduped by author+permlink and don't bump the count.
+- `latestTimestamp` — ISO timestamp of the most recent matching snap, or `null`.
+- `serverTime` — this server's clock at response time. Callers should use this (not their own
+  clock) as the `since` for their next poll, to avoid client/server clock drift.
+- `warming` — `true` while the cold-start bulk fetch is in progress; `count` is `0` until it
+  clears.
+- `400` if `since` is missing or unparseable.
 
 ### `GET /health`
 
@@ -97,6 +114,8 @@ All options are set via environment variables. See `.env.example` for the full l
 | `BULK_BATCH_SIZE` | `50` | Blocks per RPC call during cold-start |
 | `MIN_NODE_SCORE` | `80` | Minimum beacon score to accept a node |
 | `BEACON_API_URL` | `https://beacon.peakd.com/api/nodes` | Node discovery endpoint |
+| `SNAP_CONTAINER_AUTHOR` | `peak.snaps` | Account whose top-level replies count as "snaps" |
+| `SNAP_RETENTION_MS` | `3600000` | How long to retain snap event timestamps (ms) |
 
 ---
 

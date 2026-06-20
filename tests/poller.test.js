@@ -1,9 +1,10 @@
 'use strict';
 
-const { extractAccounts } = require('../poller');
+const { extractAccounts, extractSnapTimestamps } = require('../poller');
 
-function makeBlock(operations) {
+function makeBlock(operations, timestamp = '2024-01-01T00:00:00') {
   return {
+    timestamp,
     transactions: [{ operations }],
   };
 }
@@ -60,5 +61,51 @@ describe('extractAccounts', () => {
   test('malformed operation (not array, no value) does not throw', () => {
     const block = makeBlock([{ some: 'garbage' }]);
     expect(() => extractAccounts(block)).not.toThrow();
+  });
+});
+
+describe('extractSnapTimestamps', () => {
+  test('a comment with parent_author: "peak.snaps" yields one event', () => {
+    const block = makeBlock([
+      ['comment', { parent_author: 'peak.snaps', permlink: 'my-snap', author: 'alice', body: 'hi' }],
+    ]);
+    const events = extractSnapTimestamps(block);
+    expect(events.length).toBe(1);
+    expect(events[0].key).toBe('alice/my-snap');
+  });
+
+  test('a comment with a different parent_author yields no events', () => {
+    const block = makeBlock([
+      ['comment', { parent_author: 'someone-else', permlink: 'my-snap', author: 'alice', body: 'hi' }],
+    ]);
+    expect(extractSnapTimestamps(block).length).toBe(0);
+  });
+
+  test('a non-comment op is ignored even with an author field equal to peak.snaps', () => {
+    const block = makeBlock([
+      ['vote', { voter: 'alice', author: 'peak.snaps', permlink: 'container-post' }],
+    ]);
+    expect(extractSnapTimestamps(block).length).toBe(0);
+  });
+
+  test('a block timestamp without a trailing Z is parsed as UTC', () => {
+    const timestamp = '2024-01-01T00:00:00';
+    const block = makeBlock(
+      [['comment', { parent_author: 'peak.snaps', permlink: 'my-snap', author: 'alice' }]],
+      timestamp
+    );
+    const events = extractSnapTimestamps(block);
+    expect(events[0].timestamp).toBe(Date.parse(`${timestamp}Z`));
+  });
+
+  test('an edited snap (same author/permlink re-broadcast) yields two events with identical keys', () => {
+    const block = makeBlock([
+      ['comment', { parent_author: 'peak.snaps', permlink: 'my-snap', author: 'alice', body: 'original' }],
+      ['comment', { parent_author: 'peak.snaps', permlink: 'my-snap', author: 'alice', body: 'edited' }],
+    ]);
+    const events = extractSnapTimestamps(block);
+    expect(events.length).toBe(2);
+    expect(events[0].key).toBe('alice/my-snap');
+    expect(events[1].key).toBe('alice/my-snap');
   });
 });

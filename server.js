@@ -2,7 +2,7 @@
 
 const express = require('express');
 
-function createServer(state) {
+function createServer(state, snapLog) {
   const app = express();
 
   app.get('/active-users', (req, res) => {
@@ -10,6 +10,26 @@ function createServer(state) {
       count: state.warming ? null : state.count,
       warming: state.warming,
       updatedAt: state.updatedAt,
+    });
+  });
+
+  app.get('/new-snaps', (req, res) => {
+    const sinceRaw = req.query.since;
+    const since = sinceRaw && /^\d+$/.test(String(sinceRaw))
+      ? parseInt(sinceRaw, 10)
+      : Date.parse(String(sinceRaw ?? ''));
+
+    if (!sinceRaw || !Number.isFinite(since)) {
+      return res.status(400).json({ error: 'since query param required (epoch ms or ISO-8601 timestamp)' });
+    }
+
+    const count = state.warming || !snapLog ? 0 : snapLog.countSince(since);
+    const latest = snapLog ? snapLog.latest : null;
+    res.json({
+      count,
+      latestTimestamp: latest ? new Date(latest).toISOString() : null,
+      serverTime: new Date().toISOString(),
+      warming: state.warming,
     });
   });
 

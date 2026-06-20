@@ -2,32 +2,64 @@
 
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? '30000', 10);
 const BULK_BATCH_SIZE = parseInt(process.env.BULK_BATCH_SIZE ?? '50', 10);
+const SNAP_CONTAINER_AUTHOR = process.env.SNAP_CONTAINER_AUTHOR ?? 'peak.snaps';
 
 const ACCOUNT_FIELDS = [
   'author', 'voter', 'account', 'from', 'to',
   'delegator', 'delegatee', 'creator', 'new_account_name',
 ];
 
-function extractAccounts(block) {
-  const accounts = new Set();
-  if (!block || !Array.isArray(block.transactions)) return accounts;
+// Shared walk: extracts the operation payload (array or object dhive shape)
+// for every operation in every transaction, skipping malformed entries.
+function walkOperations(block, callback) {
+  if (!block || !Array.isArray(block.transactions)) return;
   for (const tx of block.transactions) {
     if (!Array.isArray(tx.operations)) continue;
     for (const op of tx.operations) {
       try {
         const payload = Array.isArray(op) ? op[1] : op?.value;
         if (!payload || typeof payload !== 'object') continue;
-        for (const field of ACCOUNT_FIELDS) {
-          if (payload[field] && typeof payload[field] === 'string') {
-            accounts.add(payload[field]);
-          }
-        }
+        callback(payload);
       } catch {
         // silently skip malformed operations
       }
     }
   }
+}
+
+function extractAccounts(block) {
+  const accounts = new Set();
+  walkOperations(block, (payload) => {
+    for (const field of ACCOUNT_FIELDS) {
+      if (payload[field] && typeof payload[field] === 'string') {
+        accounts.add(payload[field]);
+      }
+    }
+  });
   return accounts;
+}
+
+// Top-level replies to the snap container account. No op-type check needed —
+// only comment operations carry `parent_author`/`permlink` together, so the
+// field check alone is an unambiguous signal. `key` is author/permlink so
+// SnapEventLog can dedupe edits (same operation shape re-broadcast on edit).
+function extractSnapTimestamps(block) {
+  const events = [];
+  if (!block) return events;
+  // Hive block timestamps omit the trailing 'Z' (e.g. "2024-01-01T00:00:00").
+  // Without appending it, Date.parse treats the string as LOCAL time and every
+  // recorded event lands off by the server's UTC offset. Always append 'Z'
+  // unless it's already there.
+  const blockTime = block.timestamp
+    ? Date.parse(block.timestamp.endsWith('Z') ? block.timestamp : `${block.timestamp}Z`)
+    : Date.now();
+  walkOperations(block, (payload) => {
+    if (payload.parent_author === SNAP_CONTAINER_AUTHOR && typeof payload.permlink === 'string') {
+      const key = typeof payload.author === 'string' ? `${payload.author}/${payload.permlink}` : null;
+      events.push({ timestamp: blockTime, key });
+    }
+  });
+  return events;
 }
 
 async function fetchBlockRange(client, from, to) {
@@ -50,7 +82,7 @@ async function fetchBlockRange(client, from, to) {
   }
 }
 
-async function coldStart(client, window) {
+async function coldStart(client, window, snapLog) {
   console.log('[hive-sidecar] Starting bulk cold-start fetch…');
   const props = await client.database.getDynamicGlobalProperties();
   const head = props.head_block_number;
@@ -62,6 +94,9 @@ async function coldStart(client, window) {
     for (const block of blocks) {
       const accounts = extractAccounts(block);
       for (const account of accounts) window.upsert(account);
+      if (snapLog) {
+        for (const evt of extractSnapTimestamps(block)) snapLog.record(evt.timestamp, evt.key);
+      }
     }
   }
 
@@ -69,7 +104,7 @@ async function coldStart(client, window) {
   return head;
 }
 
-function startPollLoop(client, window, state) {
+function startPollLoop(client, window, state, snapLog) {
   let consecutiveFailures = 0;
 
   const tick = async () => {
@@ -85,9 +120,13 @@ function startPollLoop(client, window, state) {
       for (const block of blocks) {
         const accounts = extractAccounts(block);
         for (const account of accounts) window.upsert(account);
+        if (snapLog) {
+          for (const evt of extractSnapTimestamps(block)) snapLog.record(evt.timestamp, evt.key);
+        }
       }
 
       window.evict();
+      if (snapLog) snapLog.evict();
       state.lastProcessedBlock = head;
       state.updatedAt = new Date().toISOString();
       consecutiveFailures = 0;
@@ -114,4 +153,4 @@ function startPollLoop(client, window, state) {
   return setInterval(tick, POLL_INTERVAL_MS);
 }
 
-module.exports = { extractAccounts, coldStart, startPollLoop, fetchBlockRange };
+module.exports = { extractAccounts, extractSnapTimestamps, coldStart, startPollLoop, fetchBlockRange };

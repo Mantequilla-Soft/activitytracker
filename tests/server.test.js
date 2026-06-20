@@ -2,6 +2,7 @@
 
 const request = require('supertest');
 const { createServer } = require('../server');
+const { SnapEventLog } = require('../snap-window');
 
 describe('HTTP server', () => {
   test('GET /active-users during warm-up returns count=null, warming=true', async () => {
@@ -53,5 +54,50 @@ describe('HTTP server', () => {
       request(app).get('/active-users'),
     ]);
     expect(r1.body.count).toBe(r2.body.count);
+  });
+});
+
+describe('GET /new-snaps', () => {
+  test('missing since returns 400', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const app = createServer(state, new SnapEventLog());
+    const res = await request(app).get('/new-snaps');
+    expect(res.status).toBe(400);
+  });
+
+  test('unparseable since returns 400', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const app = createServer(state, new SnapEventLog());
+    const res = await request(app).get('/new-snaps?since=banana');
+    expect(res.status).toBe(400);
+  });
+
+  test('valid since with one recent event in the log returns count: 1', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const snapLog = new SnapEventLog();
+    const since = Date.now() - 60000;
+    snapLog.record(Date.now());
+    const app = createServer(state, snapLog);
+    const res = await request(app).get(`/new-snaps?since=${since}`);
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(1);
+  });
+
+  test('state.warming === true returns count: 0 regardless of log contents', async () => {
+    const state = { warming: true, count: 0, updatedAt: new Date().toISOString() };
+    const snapLog = new SnapEventLog();
+    snapLog.record(Date.now());
+    const app = createServer(state, snapLog);
+    const res = await request(app).get(`/new-snaps?since=${Date.now() - 60000}`);
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(0);
+  });
+
+  test('no snapLog passed to createServer returns count: 0 and does not throw', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const app = createServer(state);
+    const res = await request(app).get(`/new-snaps?since=${Date.now() - 60000}`);
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(0);
   });
 });
