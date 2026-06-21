@@ -4,6 +4,8 @@ const request = require('supertest');
 const { createServer } = require('../server');
 const { SnapEventLog } = require('../snap-window');
 const { AuthorTally } = require('../author-tally');
+const { PatronSubscriptions } = require('../patron-subscriptions');
+const { PatronDelegations } = require('../patron-delegations');
 
 describe('HTTP server', () => {
   test('GET /active-users during warm-up returns count=null, warming=true', async () => {
@@ -179,5 +181,108 @@ describe('GET /trending-authors', () => {
     const res = await request(app).get('/trending-authors?limit=banana');
     expect(res.status).toBe(200);
     expect(res.body.authors.length).toBe(20);
+  });
+});
+
+describe('GET /patrons and /patrons/:account', () => {
+  // PatronDelegations has no public setter besides sync(), so populate it via
+  // a mocked fetch the same way tests/patron-delegations.test.js does.
+  async function delegationsWith(entries) {
+    let call = 0;
+    const responses = [
+      { ok: true, json: () => Promise.resolve({ hive: { usd: 1 } }) },
+      { ok: true, json: () => Promise.resolve({ list: entries }) },
+    ];
+    global.fetch = jest.fn(() => Promise.resolve(responses[call++]));
+    const pd = new PatronDelegations();
+    const client = {
+      database: {
+        getDynamicGlobalProperties: () => Promise.resolve({
+          total_vesting_fund_hive: '1000000 HIVE',
+          total_vesting_shares: '1000000 VESTS',
+        }),
+      },
+    };
+    await pd.sync(client);
+    delete global.fetch;
+    return pd;
+  }
+
+  test('empty state returns patrons: []', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const app = createServer(state, undefined, undefined, new PatronSubscriptions(), new PatronDelegations());
+    const res = await request(app).get('/patrons');
+    expect(res.status).toBe(200);
+    expect(res.body.patrons).toEqual([]);
+  });
+
+  test('missing patronSubs/patronDelegations returns patrons: [] and does not throw', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const app = createServer(state);
+    const res = await request(app).get('/patrons');
+    expect(res.status).toBe(200);
+    expect(res.body.patrons).toEqual([]);
+  });
+
+  test('state.warming === true returns patrons: [] regardless of contents', async () => {
+    const state = { warming: true, count: 0, updatedAt: new Date().toISOString() };
+    const patronSubs = new PatronSubscriptions();
+    patronSubs.record('alice', 'snapie', '5.000 HBD', 'snapiepatron');
+    const app = createServer(state, undefined, undefined, patronSubs, new PatronDelegations());
+    const res = await request(app).get('/patrons');
+    expect(res.status).toBe(200);
+    expect(res.body.patrons).toEqual([]);
+  });
+
+  test('one subscription-only patron', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const patronSubs = new PatronSubscriptions();
+    patronSubs.record('alice', 'snapie', '5.000 HBD', 'snapiepatron');
+    const app = createServer(state, undefined, undefined, patronSubs, new PatronDelegations());
+    const res = await request(app).get('/patrons');
+    expect(res.status).toBe(200);
+    expect(res.body.patrons).toEqual([{ account: 'alice', tier: 'snap-master', via: 'subscription' }]);
+  });
+
+  test('one delegation-only patron', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const patronDelegations = await delegationsWith([
+      { delegator: 'bob', vesting_shares: '1000000.000000 VESTS' },
+    ]);
+    const app = createServer(state, undefined, undefined, new PatronSubscriptions(), patronDelegations);
+    const res = await request(app).get('/patrons');
+    expect(res.status).toBe(200);
+    expect(res.body.patrons).toEqual([{ account: 'bob', tier: 'snap-master', via: 'delegation' }]);
+  });
+
+  test('a patron qualifying via both — via: "both" and the higher tier wins', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const patronSubs = new PatronSubscriptions();
+    patronSubs.record('carol', 'snapie', '1.000 HBD', 'snapiepatron'); // snapian
+    const patronDelegations = await delegationsWith([
+      { delegator: 'carol', vesting_shares: '1000000.000000 VESTS' }, // snap-master
+    ]);
+    const app = createServer(state, undefined, undefined, patronSubs, patronDelegations);
+    const res = await request(app).get('/patrons');
+    expect(res.status).toBe(200);
+    expect(res.body.patrons).toEqual([{ account: 'carol', tier: 'snap-master', via: 'both' }]);
+  });
+
+  test('GET /patrons/:account for an unknown account returns tier: null', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const app = createServer(state, undefined, undefined, new PatronSubscriptions(), new PatronDelegations());
+    const res = await request(app).get('/patrons/nobody');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ account: 'nobody', tier: null });
+  });
+
+  test('GET /patrons/:account for a known account returns its combined tier', async () => {
+    const state = { warming: false, count: 0, updatedAt: new Date().toISOString() };
+    const patronSubs = new PatronSubscriptions();
+    patronSubs.record('alice', 'snapie', '5.000 HBD', 'snapiepatron');
+    const app = createServer(state, undefined, undefined, patronSubs, new PatronDelegations());
+    const res = await request(app).get('/patrons/alice');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ account: 'alice', tier: 'snap-master' });
   });
 });

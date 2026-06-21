@@ -2,7 +2,15 @@
 
 const express = require('express');
 
-function createServer(state, snapLog, authorTally) {
+function combinedTier(subTier, delTier) {
+  const RANK = { 'snap-master': 3, snapian: 2, snaperino: 1 };
+  const subRank = RANK[subTier] ?? 0;
+  const delRank = RANK[delTier] ?? 0;
+  if (subRank === 0 && delRank === 0) return null;
+  return subRank >= delRank ? subTier : delTier;
+}
+
+function createServer(state, snapLog, authorTally, patronSubs, patronDelegations) {
   const app = express();
 
   app.get('/active-users', (req, res) => {
@@ -39,6 +47,29 @@ function createServer(state, snapLog, authorTally) {
 
     const authors = state.warming || !authorTally ? [] : authorTally.top(limit);
     res.json({ authors, warming: state.warming });
+  });
+
+  app.get('/patrons', (req, res) => {
+    if (state.warming || !patronSubs || !patronDelegations) return res.json({ patrons: [] });
+    const accounts = new Set([
+      ...patronSubs.all.map(p => p.account),
+      ...patronDelegations.all.map(p => p.account),
+    ]);
+    const patrons = [...accounts].map(account => {
+      const subTier = patronSubs.tierFor(account);
+      const delTier = patronDelegations.tierFor(account);
+      const tier = combinedTier(subTier, delTier);
+      const via = subTier && delTier ? 'both' : subTier ? 'subscription' : 'delegation';
+      return { account, tier, via };
+    }).filter(p => p.tier);
+    res.json({ patrons });
+  });
+
+  app.get('/patrons/:account', (req, res) => {
+    if (!patronSubs || !patronDelegations) return res.json({ account: req.params.account, tier: null });
+    const subTier = patronSubs.tierFor(req.params.account);
+    const delTier = patronDelegations.tierFor(req.params.account);
+    res.json({ account: req.params.account, tier: combinedTier(subTier, delTier) });
   });
 
   app.get('/health', (req, res) => {

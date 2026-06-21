@@ -11,15 +11,18 @@ const ACCOUNT_FIELDS = [
 
 // Shared walk: extracts the operation payload (array or object dhive shape)
 // for every operation in every transaction, skipping malformed entries.
+// Also passes the operation name as a second arg — existing callers ignore
+// it, but transfer-shaped extraction needs to know it's actually a transfer.
 function walkOperations(block, callback) {
   if (!block || !Array.isArray(block.transactions)) return;
   for (const tx of block.transactions) {
     if (!Array.isArray(tx.operations)) continue;
     for (const op of tx.operations) {
       try {
+        const opName = Array.isArray(op) ? op[0] : op?.type;
         const payload = Array.isArray(op) ? op[1] : op?.value;
         if (!payload || typeof payload !== 'object') continue;
-        callback(payload);
+        callback(payload, opName);
       } catch {
         // silently skip malformed operations
       }
@@ -63,6 +66,27 @@ function extractSnapTimestamps(block) {
   return events;
 }
 
+// Transfers/recurrent_transfers to the patron account. Array-form ops (from
+// block_api.get_block_range, the primary path) use short names like
+// 'transfer'/'recurrent_transfer'. The getBlock() fallback path may return
+// object-form ops with HF26-suffixed type names ('transfer_operation') —
+// match both conventions defensively.
+function extractPatronTransfers(block) {
+  const transfers = [];
+  if (!block) return transfers;
+  const blockTime = block.timestamp
+    ? Date.parse(block.timestamp.endsWith('Z') ? block.timestamp : `${block.timestamp}Z`)
+    : Date.now();
+  walkOperations(block, (payload, opName) => {
+    const isTransferOp = opName === 'transfer' || opName === 'transfer_operation'
+      || opName === 'recurrent_transfer' || opName === 'recurrent_transfer_operation';
+    if (!isTransferOp) return;
+    if (typeof payload.from !== 'string' || typeof payload.to !== 'string') return;
+    transfers.push({ from: payload.from, to: payload.to, amount: payload.amount, memo: payload.memo, timestamp: blockTime });
+  });
+  return transfers;
+}
+
 async function fetchBlockRange(client, from, to) {
   try {
     const blocks = await client.database.call('block_api.get_block_range', [{ starting_block_num: from, count: to - from + 1 }]);
@@ -83,7 +107,7 @@ async function fetchBlockRange(client, from, to) {
   }
 }
 
-async function coldStart(client, window, snapLog, authorTally) {
+async function coldStart(client, window, snapLog, authorTally, patronSubs) {
   console.log('[hive-sidecar] Starting bulk cold-start fetch…');
   const props = await client.database.getDynamicGlobalProperties();
   const head = props.head_block_number;
@@ -101,6 +125,11 @@ async function coldStart(client, window, snapLog, authorTally) {
           if (authorTally && evt.author) authorTally.record(evt.author, evt.timestamp);
         }
       }
+      if (patronSubs) {
+        for (const t of extractPatronTransfers(block)) {
+          patronSubs.record(t.from, t.to, t.amount, t.memo, t.timestamp);
+        }
+      }
     }
   }
 
@@ -108,7 +137,7 @@ async function coldStart(client, window, snapLog, authorTally) {
   return head;
 }
 
-function startPollLoop(client, window, state, snapLog, authorTally) {
+function startPollLoop(client, window, state, snapLog, authorTally, patronSubs) {
   let consecutiveFailures = 0;
 
   const tick = async () => {
@@ -130,11 +159,17 @@ function startPollLoop(client, window, state, snapLog, authorTally) {
             if (authorTally && evt.author) authorTally.record(evt.author, evt.timestamp);
           }
         }
+        if (patronSubs) {
+          for (const t of extractPatronTransfers(block)) {
+            patronSubs.record(t.from, t.to, t.amount, t.memo, t.timestamp);
+          }
+        }
       }
 
       window.evict();
       if (snapLog) snapLog.evict();
       if (authorTally) authorTally.evict();
+      if (patronSubs) patronSubs.evict();
       state.lastProcessedBlock = head;
       state.updatedAt = new Date().toISOString();
       consecutiveFailures = 0;
@@ -161,4 +196,4 @@ function startPollLoop(client, window, state, snapLog, authorTally) {
   return setInterval(tick, POLL_INTERVAL_MS);
 }
 
-module.exports = { extractAccounts, extractSnapTimestamps, coldStart, startPollLoop, fetchBlockRange };
+module.exports = { extractAccounts, extractSnapTimestamps, extractPatronTransfers, coldStart, startPollLoop, fetchBlockRange };

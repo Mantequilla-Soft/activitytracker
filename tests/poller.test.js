@@ -1,12 +1,17 @@
 'use strict';
 
-const { extractAccounts, extractSnapTimestamps } = require('../poller');
+const { extractAccounts, extractSnapTimestamps, extractPatronTransfers } = require('../poller');
 
 function makeBlock(operations, timestamp = '2024-01-01T00:00:00') {
   return {
     timestamp,
     transactions: [{ operations }],
   };
+}
+
+// HF26-style object-form op, as returned by the getBlock() fallback path.
+function objectOp(type, value) {
+  return { type, value };
 }
 
 describe('extractAccounts', () => {
@@ -123,5 +128,59 @@ describe('extractSnapTimestamps', () => {
     expect(events.length).toBe(2);
     expect(events[0].key).toBe('alice/my-snap');
     expect(events[1].key).toBe('alice/my-snap');
+  });
+});
+
+describe('extractPatronTransfers', () => {
+  test('array-form transfer op yields a transfer', () => {
+    const block = makeBlock([
+      ['transfer', { from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron' }],
+    ]);
+    const transfers = extractPatronTransfers(block);
+    expect(transfers).toEqual([
+      { from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron', timestamp: Date.parse('2024-01-01T00:00:00Z') },
+    ]);
+  });
+
+  test('array-form recurrent_transfer op yields a transfer', () => {
+    const block = makeBlock([
+      ['recurrent_transfer', { from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron' }],
+    ]);
+    const transfers = extractPatronTransfers(block);
+    expect(transfers.length).toBe(1);
+    expect(transfers[0].from).toBe('alice');
+  });
+
+  test('object-form (HF26-suffixed) transfer_operation yields a transfer', () => {
+    const block = makeBlock([
+      objectOp('transfer_operation', { from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron' }),
+    ]);
+    const transfers = extractPatronTransfers(block);
+    expect(transfers.length).toBe(1);
+    expect(transfers[0]).toEqual({ from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron', timestamp: Date.parse('2024-01-01T00:00:00Z') });
+  });
+
+  test('object-form (HF26-suffixed) recurrent_transfer_operation yields a transfer', () => {
+    const block = makeBlock([
+      objectOp('recurrent_transfer_operation', { from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron' }),
+    ]);
+    const transfers = extractPatronTransfers(block);
+    expect(transfers.length).toBe(1);
+    expect(transfers[0].from).toBe('alice');
+  });
+
+  test('a vote op (no to/amount) is ignored', () => {
+    const block = makeBlock([
+      ['vote', { voter: 'alice', author: 'bob', permlink: 'test' }],
+    ]);
+    expect(extractPatronTransfers(block).length).toBe(0);
+  });
+
+  test('block with 0 transactions yields 0 transfers', () => {
+    expect(extractPatronTransfers({ transactions: [] }).length).toBe(0);
+  });
+
+  test('null block does not throw', () => {
+    expect(() => extractPatronTransfers(null)).not.toThrow();
   });
 });
