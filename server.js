@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const { hydrateItems, FEED_PAGE_LIMIT_DEFAULT, FEED_PAGE_LIMIT_MAX } = require('./feed-index');
 
 function combinedTier(subTier, delTier) {
   const RANK = { 'snap-master': 3, snapian: 2, snaperino: 1 };
@@ -10,7 +11,7 @@ function combinedTier(subTier, delTier) {
   return subRank >= delRank ? subTier : delTier;
 }
 
-function createServer(state, snapLog, authorTally, patronSubs, patronDelegations) {
+function createServer(state, snapLog, authorTally, patronSubs, patronDelegations, feedIndex, client) {
   const app = express();
 
   app.get('/active-users', (req, res) => {
@@ -72,8 +73,57 @@ function createServer(state, snapLog, authorTally, patronSubs, patronDelegations
     res.json({ account: req.params.account, tier: combinedTier(subTier, delTier) });
   });
 
+  app.get('/feed', async (req, res) => {
+    if (!feedIndex || !client) return res.json({ items: [], hasMore: false });
+    if (state.feedWarming) return res.json({ items: [], hasMore: true });
+
+    const before = req.query.before ? String(req.query.before) : undefined;
+    const requested = parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(requested)
+      ? Math.max(1, Math.min(requested, FEED_PAGE_LIMIT_MAX))
+      : FEED_PAGE_LIMIT_DEFAULT;
+
+    try {
+      const { items: pointers, hasMore } = await feedIndex.getPage(client, { before, limit });
+      const items = await hydrateItems(client, pointers);
+      res.json({ items, hasMore });
+    } catch (err) {
+      console.log(`[hive-sidecar] feed: ERROR /feed request failed — ${err.message}`);
+      res.status(502).json({ items: [], hasMore: false });
+    }
+  });
+
+  app.get('/feed/new-since', (req, res) => {
+    const sinceRaw = req.query.since;
+    const since = sinceRaw && /^\d+$/.test(String(sinceRaw))
+      ? parseInt(sinceRaw, 10)
+      : Date.parse(String(sinceRaw ?? ''));
+
+    if (!sinceRaw || !Number.isFinite(since)) {
+      return res.status(400).json({ error: 'since query param required (epoch ms or ISO-8601 timestamp)' });
+    }
+
+    const count = state.feedWarming || !feedIndex ? 0 : feedIndex.countSince(since);
+    const latest = state.feedWarming || !feedIndex ? null : feedIndex.newestIndexed;
+    res.json({
+      count,
+      latestTimestamp: latest,
+      serverTime: new Date().toISOString(),
+      warming: state.feedWarming ?? true,
+    });
+  });
+
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok' });
+    const health = { status: 'ok' };
+    if (feedIndex && !state.feedWarming) {
+      health.feedIndex = {
+        snapContainers: feedIndex.containerCount('snap'),
+        waveContainers: feedIndex.containerCount('wave'),
+        oldestIndexed: feedIndex.oldestIndexed,
+        newestIndexed: feedIndex.newestIndexed,
+      };
+    }
+    res.json(health);
   });
 
   app.use((req, res) => {

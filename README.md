@@ -22,6 +22,8 @@ hive-client.js     — beacon node discovery, dhive client, 60-min node refresh
 rolling-window.js  — in-memory Map with upsert + evict logic
 snap-window.js     — append-only event log for new-snap counting, dedupes edits
 author-tally.js    — per-author snap counts for trending-authors suggestions
+feed-index.js      — pointer index for the blended snap+wave feed; two container
+                      walkers, bounded per-source eviction, scroll-past-cache fallback
 poller.js          — block fetching loop, account extraction, snap detection
 server.js          — Express HTTP server (localhost only)
 ecosystem.config.js— PM2 process config
@@ -73,11 +75,67 @@ The sidecar binds to `127.0.0.1:3099` only — never exposed to the public inter
 - `warming` — `true` while the cold-start bulk fetch is in progress; `authors` is `[]` until it
   clears.
 
+### `GET /feed?before=<iso>&limit=<n>`
+
+```json
+{
+  "items": [
+    {
+      "source": "wave",
+      "author": "...",
+      "permlink": "...",
+      "created": "...",
+      "parentAuthor": "ecency.waves",
+      "parentPermlink": "waves-2026-06-30",
+      "body": "...",
+      "json_metadata": "...",
+      "active_votes": [...],
+      "children": 0
+    }
+  ],
+  "hasMore": true
+}
+```
+
+- A blended, `created`-descending feed of top-level replies to both `peak.snaps` and
+  `ecency.waves`, fully hydrated (`body`, `json_metadata`, `active_votes`, `children` fetched at
+  request time — no separate hydration step needed downstream).
+- `limit` — optional, 1–50, default 20.
+- `before` — optional ISO cursor; omit for the newest page. If `before` is older than the sidecar's
+  cached window, a bounded on-demand walk (up to 30 containers per source) fills in older history
+  before responding.
+- `hasMore` — `true` if more items exist, or if either source hasn't yet been confirmed to have no
+  older history. Treats "haven't checked yet" as `true` (optimistic).
+
+### `GET /feed/new-since?since=<epoch-ms-or-ISO-8601>`
+
+```json
+{ "count": 7, "latestTimestamp": "2026-06-30T14:05:02.000Z", "serverTime": "2026-06-30T14:05:30.000Z", "warming": false }
+```
+
+- `count` — number of new top-level replies across **both** `peak.snaps` and `ecency.waves` since
+  `since`. Distinct from `/new-snaps`, which is scoped to `peak.snaps` only — existing callers of
+  `/new-snaps` are unaffected by this endpoint.
+- Answered entirely from the already-maintained `/feed` index — no new RPC calls. Because the index
+  only retains ~2 weeks of history per source, a `since` older than that will undercount rather than
+  triggering a deep walk; acceptable for a "new stuff" polling pill, not a correctness guarantee.
+- `400` if `since` is missing or unparseable, same convention as `/new-snaps`.
+
 ### `GET /health`
 
 ```json
-{ "status": "ok" }
+{
+  "status": "ok",
+  "feedIndex": {
+    "snapContainers": 14,
+    "waveContainers": 14,
+    "oldestIndexed": "2026-06-16T00:00:00.000Z",
+    "newestIndexed": "2026-06-30T14:02:11.000Z"
+  }
+}
 ```
+
+The `feedIndex` block appears only once the feed walkers have completed at least one poll tick.
 
 ---
 
@@ -131,6 +189,10 @@ All options are set via environment variables. See `.env.example` for the full l
 | `SNAP_CONTAINER_AUTHOR` | `peak.snaps` | Account whose top-level replies count as "snaps" |
 | `SNAP_RETENTION_MS` | `3600000` | How long to retain snap event timestamps (ms) |
 | `TRENDING_AUTHORS_WINDOW_MS` | `86400000` | How long to retain per-author snap counts (ms) |
+| `FEED_POLL_INTERVAL_MS` | `120000` | How often to poll for new/updated snap+wave containers (ms) |
+| `WAVE_CONTAINER_AUTHOR` | `ecency.waves` | Hive account whose top-level replies count as "waves" |
+| `MAX_INDEXED_CONTAINERS_PER_SOURCE` | `14` | Max container posts retained per source in the feed index |
+| `MAX_CONTAINERS_PER_FALLBACK_WALK` | `30` | Max containers walked on demand per source for a deep `/feed` scroll |
 
 ---
 

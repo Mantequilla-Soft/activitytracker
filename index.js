@@ -6,6 +6,7 @@ const { SnapEventLog } = require('./snap-window');
 const { AuthorTally } = require('./author-tally');
 const { PatronSubscriptions } = require('./patron-subscriptions');
 const { PatronDelegations, DELEGATION_SYNC_INTERVAL_MS } = require('./patron-delegations');
+const { FeedIndex, coldStartFeedIndex, startFeedPollLoop } = require('./feed-index');
 const { coldStart, startPollLoop } = require('./poller');
 const { createServer, startServer } = require('./server');
 
@@ -14,6 +15,7 @@ const state = {
   count: 0,
   updatedAt: new Date().toISOString(),
   lastProcessedBlock: 0,
+  feedWarming: true,
 };
 
 async function main() {
@@ -22,10 +24,14 @@ async function main() {
   const authorTally = new AuthorTally();
   const patronSubs = new PatronSubscriptions();
   const patronDelegations = new PatronDelegations();
-  const app = createServer(state, snapLog, authorTally, patronSubs, patronDelegations);
-  startServer(app);
+  const feedIndex = new FeedIndex();
 
+  // Created before createServer — unlike the other route dependencies, the
+  // /feed route needs a live client reference at request time.
   const client = await createHiveClient();
+
+  const app = createServer(state, snapLog, authorTally, patronSubs, patronDelegations, feedIndex, client);
+  startServer(app);
 
   patronDelegations.sync(client);
   setInterval(() => patronDelegations.sync(client), DELEGATION_SYNC_INTERVAL_MS);
@@ -43,6 +49,16 @@ async function main() {
     origEvict(...args);
     state.count = window.size;
   };
+
+  // Independent RPC domain from the block-scan poller above — deliberately
+  // not awaited before main() returns, so a slow/failed feed backfill can't
+  // delay (or be delayed by) the block-scan warmup.
+  coldStartFeedIndex(client, feedIndex)
+    .catch(err => console.error('[hive-sidecar] feed: cold-start failed — poll loop will self-heal', err))
+    .finally(() => {
+      state.feedWarming = false;
+      startFeedPollLoop(client, feedIndex);
+    });
 }
 
 main().catch(err => {
