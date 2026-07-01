@@ -26,6 +26,13 @@ async function main() {
   const patronDelegations = new PatronDelegations();
   const feedIndex = new FeedIndex();
 
+  // Restore persisted patron state before anything else touches these maps —
+  // patronDelegations.sync() ratchets against whatever's already in
+  // _byAccount, and coldStart()'s 30-min backfill layers new record() calls
+  // on top of patronSubs' restored state, so both must be loaded first.
+  patronSubs.load();
+  patronDelegations.load();
+
   // Created before createServer — unlike the other route dependencies, the
   // /feed route needs a live client reference at request time.
   const client = await createHiveClient();

@@ -169,7 +169,10 @@ function startPollLoop(client, window, state, snapLog, authorTally, patronSubs) 
       window.evict();
       if (snapLog) snapLog.evict();
       if (authorTally) authorTally.evict();
-      if (patronSubs) patronSubs.evict();
+      if (patronSubs) {
+        patronSubs.evict();
+        patronSubs.save();
+      }
       state.lastProcessedBlock = head;
       state.updatedAt = new Date().toISOString();
       consecutiveFailures = 0;

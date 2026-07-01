@@ -1,5 +1,7 @@
 'use strict';
 
+const os = require('os');
+const path = require('path');
 const request = require('supertest');
 const { createServer } = require('../server');
 const { SnapEventLog } = require('../snap-window');
@@ -194,7 +196,10 @@ describe('GET /patrons and /patrons/:account', () => {
       { ok: true, json: () => Promise.resolve({ list: entries }) },
     ];
     global.fetch = jest.fn(() => Promise.resolve(responses[call++]));
-    const pd = new PatronDelegations();
+    // Temp stateFile — sync() now persists to disk on success, and this
+    // helper shouldn't write into the real repo-relative default file.
+    const stateFile = path.join(os.tmpdir(), `patron-delegations-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+    const pd = new PatronDelegations(stateFile);
     const client = {
       database: {
         getDynamicGlobalProperties: () => Promise.resolve({

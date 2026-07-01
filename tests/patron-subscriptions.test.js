@@ -1,6 +1,13 @@
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { PatronSubscriptions, tierForAmount } = require('../patron-subscriptions');
+
+function tmpStateFile() {
+  return path.join(os.tmpdir(), `patron-subscriptions-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+}
 
 describe('tierForAmount', () => {
   test('5+ HBD is snap-master', () => {
@@ -87,5 +94,44 @@ describe('PatronSubscriptions.evict', () => {
     ps.record('alice', 'snapie', '5.000 HBD', 'snapiepatron', now);
     ps.evict(now + 1000 * 60 * 60 * 24 * 10); // 10 days later
     expect(ps.tierFor('alice')).toBe('snap-master');
+  });
+});
+
+describe('PatronSubscriptions persistence', () => {
+  test('save() writes a file a fresh instance can load back', () => {
+    const stateFile = tmpStateFile();
+    const ps = new PatronSubscriptions(3024000000, stateFile);
+    ps.record('alice', 'snapie', '5.000 HBD', 'snapiepatron');
+    ps.save();
+
+    try {
+      const reloaded = new PatronSubscriptions(3024000000, stateFile);
+      reloaded.load();
+      expect(reloaded.tierFor('alice')).toBe('snap-master');
+    } finally {
+      fs.unlinkSync(stateFile);
+    }
+  });
+
+  test('load() with no file present leaves the map empty', () => {
+    const ps = new PatronSubscriptions(3024000000, tmpStateFile());
+    ps.load();
+    expect(ps.all).toEqual([]);
+  });
+
+  test('load() immediately evicts entries already past retention', () => {
+    const stateFile = tmpStateFile();
+    const now = Date.now();
+    const writer = new PatronSubscriptions(1000, stateFile); // 1s retention
+    writer.record('alice', 'snapie', '5.000 HBD', 'snapiepatron', now - 5000); // already stale
+    writer.save();
+
+    try {
+      const reloaded = new PatronSubscriptions(1000, stateFile);
+      reloaded.load();
+      expect(reloaded.tierFor('alice')).toBeNull();
+    } finally {
+      fs.unlinkSync(stateFile);
+    }
   });
 });

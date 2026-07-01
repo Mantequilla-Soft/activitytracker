@@ -1,11 +1,18 @@
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const {
   PatronDelegations,
   tierForUsdValue,
   vestsToHp,
   fetchHivePriceUsd,
 } = require('../patron-delegations');
+
+function tmpStateFile() {
+  return path.join(os.tmpdir(), `patron-delegations-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+}
 
 function mockFetchSequence(responses) {
   let call = 0;
@@ -90,15 +97,22 @@ describe('fetchHivePriceUsd', () => {
 });
 
 describe('PatronDelegations.sync', () => {
+  let stateFile;
+
+  beforeEach(() => {
+    stateFile = tmpStateFile();
+  });
+
   afterEach(() => {
     delete global.fetch;
+    if (fs.existsSync(stateFile)) fs.unlinkSync(stateFile);
   });
 
   test('success populates the map with correct tiers', async () => {
     mockFetchSequence([priceResponse(1), ecencyResponse([
       { delegator: 'alice', vesting_shares: '1000000.000000 VESTS' },
     ])]);
-    const pd = new PatronDelegations();
+    const pd = new PatronDelegations(stateFile);
     const client = fakeClient(500000, 1000000); // 1 VESTS = 0.5 HP
     await pd.sync(client);
     // 1,000,000 VESTS -> 500,000 HP -> $500,000 -> snap-master
@@ -110,7 +124,7 @@ describe('PatronDelegations.sync', () => {
     mockFetchSequence([priceResponse(1), ecencyResponse([
       { delegator: 'alice', vesting_shares: '1000000.000000 VESTS' },
     ])]);
-    const pd = new PatronDelegations();
+    const pd = new PatronDelegations(stateFile);
     const client = fakeClient(500000, 1000000);
     await pd.sync(client);
     expect(pd.tierFor('alice')).toBe('snap-master');
@@ -124,7 +138,7 @@ describe('PatronDelegations.sync', () => {
     mockFetchSequence([priceResponse(1), ecencyResponse([
       { delegator: 'alice', vesting_shares: '1000000.000000 VESTS' },
     ])]);
-    const pd = new PatronDelegations();
+    const pd = new PatronDelegations(stateFile);
     const client = fakeClient(500000, 1000000);
     await pd.sync(client);
     expect(pd.tierFor('alice')).toBe('snap-master');
@@ -139,7 +153,7 @@ describe('PatronDelegations.sync', () => {
     mockFetchSequence([priceResponse(0.1), ecencyResponse([
       { delegator: 'alice', vesting_shares: '1000.000000 VESTS' },
     ])]);
-    const pd = new PatronDelegations();
+    const pd = new PatronDelegations(stateFile);
     const client = fakeClient(1000000, 1000000);
     await pd.sync(client); // $100 -> snapian
     expect(pd.tierFor('alice')).toBe('snapian');
@@ -155,7 +169,7 @@ describe('PatronDelegations.sync', () => {
     mockFetchSequence([priceResponse(0.01), ecencyResponse([
       { delegator: 'alice', vesting_shares: '1000.000000 VESTS' },
     ])]);
-    const pd = new PatronDelegations();
+    const pd = new PatronDelegations(stateFile);
     const client = fakeClient(1000000, 1000000);
     await pd.sync(client); // $10 -> snaperino
     expect(pd.tierFor('alice')).toBe('snaperino');
@@ -172,7 +186,7 @@ describe('PatronDelegations.sync', () => {
     mockFetchSequence([priceResponse(1), ecencyResponse([
       { delegator: 'alice', vesting_shares: '1000.000000 VESTS' },
     ])]);
-    const pd = new PatronDelegations();
+    const pd = new PatronDelegations(stateFile);
     const client1 = fakeClient(100000, 1000000); // ratio 0.1
     await pd.sync(client1);
     expect(pd.tierFor('alice')).toBe('snapian');
@@ -195,7 +209,7 @@ describe('PatronDelegations.sync', () => {
     mockFetchSequence([priceResponse(1), ecencyResponse([
       { delegator: 'alice', vesting_shares: '100.000000 VESTS' },
     ])]);
-    const pd = new PatronDelegations();
+    const pd = new PatronDelegations(stateFile);
     const client = fakeClient(1000000, 1000000); // ratio 1:1
     await pd.sync(client); // 100 HP -> $100 -> snapian
     expect(pd.tierFor('alice')).toBe('snapian');
@@ -211,7 +225,7 @@ describe('PatronDelegations.sync', () => {
     mockFetchSequence([priceResponse(1), ecencyResponse([
       { delegator: 'alice', vesting_shares: '1000.000000 VESTS' },
     ])]);
-    const pd = new PatronDelegations();
+    const pd = new PatronDelegations(stateFile);
     const client = fakeClient(1000000, 1000000); // ratio 1:1
     await pd.sync(client); // 1000 HP -> $1000 -> snap-master
     expect(pd.tierFor('alice')).toBe('snap-master');
@@ -227,7 +241,7 @@ describe('PatronDelegations.sync', () => {
     mockFetchSequence([priceResponse(1), ecencyResponse([
       { delegator: 'alice', vesting_shares: '1000.000000 VESTS' },
     ])]);
-    const pd = new PatronDelegations();
+    const pd = new PatronDelegations(stateFile);
     const client = fakeClient(1000000, 1000000);
     await pd.sync(client);
     expect(pd.tierFor('alice')).toBe('snap-master');
@@ -236,5 +250,67 @@ describe('PatronDelegations.sync', () => {
     await pd.sync(client);
     expect(pd.tierFor('alice')).toBeNull();
     expect(pd.all).toEqual([]);
+  });
+});
+
+describe('PatronDelegations persistence', () => {
+  afterEach(() => {
+    delete global.fetch;
+  });
+
+  test('load() with no file present leaves the map empty', () => {
+    const pd = new PatronDelegations(tmpStateFile());
+    pd.load();
+    expect(pd.all).toEqual([]);
+  });
+
+  test('sync() success writes a file a fresh instance can load with matching tiers', async () => {
+    const stateFile = tmpStateFile();
+    mockFetchSequence([priceResponse(1), ecencyResponse([
+      { delegator: 'alice', vesting_shares: '1000000.000000 VESTS' },
+    ])]);
+    const pd = new PatronDelegations(stateFile);
+    const client = fakeClient(500000, 1000000);
+    await pd.sync(client);
+    expect(pd.tierFor('alice')).toBe('snap-master');
+
+    try {
+      const reloaded = new PatronDelegations(stateFile);
+      reloaded.load();
+      expect(reloaded.tierFor('alice')).toBe('snap-master');
+    } finally {
+      fs.unlinkSync(stateFile);
+    }
+  });
+
+  test('restart no longer resets the ratchet peak — the reported bug', async () => {
+    const stateFile = tmpStateFile();
+
+    // Sync 1 (before "restart"): HIVE at $1, 1000 VESTS, ratio 1:1 -> $1000 -> snap-master.
+    mockFetchSequence([priceResponse(1), ecencyResponse([
+      { delegator: 'alice', vesting_shares: '1000.000000 VESTS' },
+    ])]);
+    const before = new PatronDelegations(stateFile);
+    const client = fakeClient(1000000, 1000000);
+    await before.sync(client);
+    expect(before.tierFor('alice')).toBe('snap-master');
+
+    try {
+      // Simulate a restart: brand new instance, nothing in memory except what load() restores.
+      const after = new PatronDelegations(stateFile);
+      after.load();
+
+      // Sync 2 (after "restart"): price crashed to $0.01, same VESTS -> today's
+      // value alone would be $10 (snaperino). Without persistence, this used to
+      // silently demote alice. With load() run first, the ratchet must keep
+      // the $1000 peak found on disk.
+      mockFetchSequence([priceResponse(0.01), ecencyResponse([
+        { delegator: 'alice', vesting_shares: '1000.000000 VESTS' },
+      ])]);
+      await after.sync(client);
+      expect(after.tierFor('alice')).toBe('snap-master');
+    } finally {
+      fs.unlinkSync(stateFile);
+    }
   });
 });

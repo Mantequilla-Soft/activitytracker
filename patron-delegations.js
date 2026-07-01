@@ -1,9 +1,14 @@
 'use strict';
 
+const path = require('path');
+const { loadJsonState, saveJsonState } = require('./state-store');
+
 const PATRON_ACCOUNT = process.env.PATRON_ACCOUNT ?? 'snapie';
 const DELEGATION_SYNC_INTERVAL_MS = parseInt(process.env.DELEGATION_SYNC_INTERVAL_MS ?? '3600000', 10); // 1h
 const ECENCY_VESTING_URL = process.env.ECENCY_VESTING_URL ?? 'https://ecency.com/private-api/received-vesting';
 const COINGECKO_PRICE_URL = process.env.COINGECKO_PRICE_URL ?? 'https://api.coingecko.com/api/v3/simple/price?ids=hive&vs_currencies=usd';
+const PATRON_DELEGATIONS_STATE_FILE = process.env.PATRON_DELEGATIONS_STATE_FILE
+  ?? path.join(__dirname, 'data', 'patron-delegations-state.json');
 
 // Tier thresholds in USD value of delegated HP, highest first.
 const DELEGATION_TIERS = [
@@ -33,8 +38,20 @@ async function fetchHivePriceUsd() {
 }
 
 class PatronDelegations {
-  constructor() {
+  constructor(stateFile = PATRON_DELEGATIONS_STATE_FILE) {
+    this._stateFile = stateFile;
     this._byAccount = new Map(); // account -> { vests, hp, peakUsdValue, tier }
+  }
+
+  // Restores the ratchet's peak values from disk. Must be called before the
+  // first sync() after a restart — otherwise sync() would compute peakUsdValue
+  // fresh from today's price alone, permanently forgetting a higher historical
+  // peak earned when HIVE was worth more. sync()'s ratchet logic itself needs
+  // no changes: it just finds this loaded state via `_byAccount.get(...)`.
+  load() {
+    const saved = loadJsonState(this._stateFile);
+    if (!saved || typeof saved !== 'object') return;
+    this._byAccount = new Map(Object.entries(saved));
   }
 
   async sync(client) {
@@ -80,6 +97,7 @@ class PatronDelegations {
       // Delegators no longer in Ecency's list (fully undelegated) are simply
       // absent from `next` — atomic swap drops them, no special-casing needed.
       this._byAccount = next;
+      saveJsonState(this._stateFile, Object.fromEntries(this._byAccount));
       console.log(`[hive-sidecar] Patron delegation sync — ${next.size} qualifying delegators (HIVE @ $${hivePriceUsd})`);
     } catch (err) {
       // Leave the previous snapshot in place on failure — stale data beats no data
