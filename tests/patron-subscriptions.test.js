@@ -24,6 +24,11 @@ describe('tierForAmount', () => {
     expect(tierForAmount(0.01)).toBe('snaperino');
     expect(tierForAmount(0.99)).toBe('snaperino');
   });
+
+  test('0 or negative HBD has no tier', () => {
+    expect(tierForAmount(0)).toBeNull();
+    expect(tierForAmount(-1)).toBeNull();
+  });
 });
 
 describe('PatronSubscriptions.record', () => {
@@ -73,6 +78,47 @@ describe('PatronSubscriptions.record', () => {
     const ps = new PatronSubscriptions();
     ps.record('alice', 'snapie', '5.000 HBD', 'snapiepatron');
     expect(ps.all).toEqual([{ account: 'alice', amount: 5, tier: 'snap-master' }]);
+  });
+});
+
+describe('PatronSubscriptions cancellation', () => {
+  test('a 0-amount recurrent_transfer clears an existing subscriber, even without the memo tag', () => {
+    const ps = new PatronSubscriptions();
+    ps.record('alice', 'snapie', '5.000 HBD', 'snapiepatron', 1000, 'recurrent_transfer');
+    expect(ps.tierFor('alice')).toBe('snap-master');
+
+    ps.record('alice', 'snapie', '0.000 HBD', undefined, 2000, 'recurrent_transfer');
+    expect(ps.tierFor('alice')).toBeNull();
+    expect(ps.all).toEqual([]);
+  });
+
+  test('handles the HF26 object-form op name too', () => {
+    const ps = new PatronSubscriptions();
+    ps.record('alice', 'snapie', '5.000 HBD', 'snapiepatron', 1000, 'recurrent_transfer_operation');
+    ps.record('alice', 'snapie', '0.000 HBD', 'snapiepatron', 2000, 'recurrent_transfer_operation');
+    expect(ps.tierFor('alice')).toBeNull();
+  });
+
+  test('a plain (non-recurrent) 0-amount transfer does not clear an existing subscriber', () => {
+    const ps = new PatronSubscriptions();
+    ps.record('alice', 'snapie', '5.000 HBD', 'snapiepatron', 1000, 'recurrent_transfer');
+    ps.record('alice', 'snapie', '0.000 HBD', undefined, 2000, 'transfer');
+    expect(ps.tierFor('alice')).toBe('snap-master');
+  });
+
+  test('an out-of-order/late cancellation does not clobber a newer subscription', () => {
+    const ps = new PatronSubscriptions();
+    ps.record('alice', 'snapie', '0.000 HBD', undefined, 1000, 'recurrent_transfer');
+    ps.record('alice', 'snapie', '5.000 HBD', 'snapiepatron', 2000, 'recurrent_transfer');
+    // Late-arriving cancel from before the resubscription must not wipe it out.
+    ps.record('alice', 'snapie', '0.000 HBD', undefined, 1500, 'recurrent_transfer');
+    expect(ps.tierFor('alice')).toBe('snap-master');
+  });
+
+  test('cancelling a non-existent subscriber is a no-op', () => {
+    const ps = new PatronSubscriptions();
+    ps.record('alice', 'snapie', '0.000 HBD', undefined, 1000, 'recurrent_transfer');
+    expect(ps.tierFor('alice')).toBeNull();
   });
 });
 

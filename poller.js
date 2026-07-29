@@ -82,7 +82,7 @@ function extractPatronTransfers(block) {
       || opName === 'recurrent_transfer' || opName === 'recurrent_transfer_operation';
     if (!isTransferOp) return;
     if (typeof payload.from !== 'string' || typeof payload.to !== 'string') return;
-    transfers.push({ from: payload.from, to: payload.to, amount: payload.amount, memo: payload.memo, timestamp: blockTime });
+    transfers.push({ from: payload.from, to: payload.to, amount: payload.amount, memo: payload.memo, timestamp: blockTime, opName });
   });
   return transfers;
 }
@@ -127,7 +127,7 @@ async function coldStart(client, window, snapLog, authorTally, patronSubs) {
       }
       if (patronSubs) {
         for (const t of extractPatronTransfers(block)) {
-          patronSubs.record(t.from, t.to, t.amount, t.memo, t.timestamp);
+          patronSubs.record(t.from, t.to, t.amount, t.memo, t.timestamp, t.opName);
         }
       }
     }
@@ -161,7 +161,7 @@ function startPollLoop(client, window, state, snapLog, authorTally, patronSubs) 
         }
         if (patronSubs) {
           for (const t of extractPatronTransfers(block)) {
-            patronSubs.record(t.from, t.to, t.amount, t.memo, t.timestamp);
+            patronSubs.record(t.from, t.to, t.amount, t.memo, t.timestamp, t.opName);
           }
         }
       }

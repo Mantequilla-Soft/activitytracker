@@ -17,10 +17,15 @@ const SUBSCRIPTION_TIERS = [
 ];
 
 function tierForAmount(hbd) {
+  if (!(hbd > 0)) return null;
   for (const t of SUBSCRIPTION_TIERS) {
     if (hbd >= t.min) return t.tier;
   }
   return null;
+}
+
+function isRecurrentTransferOp(opName) {
+  return opName === 'recurrent_transfer' || opName === 'recurrent_transfer_operation';
 }
 
 class PatronSubscriptions {
@@ -49,10 +54,24 @@ class PatronSubscriptions {
   }
 
   // Call for every transfer/recurrent_transfer op already extracted by the poller.
-  record(from, to, amountStr, memo, timestamp = Date.now()) {
+  record(from, to, amountStr, memo, timestamp = Date.now(), opName) {
     if (to !== PATRON_ACCOUNT) return;
-    if (!memo || !memo.includes(PATRON_MEMO_TAG)) return;
     const amount = parseFloat(String(amountStr));
+
+    // Hive cancels a recurring transfer by rebroadcasting recurrent_transfer
+    // with amount 0 — treat that as an outright revocation regardless of memo,
+    // since wallet/Keychain cancel flows often don't preserve the original
+    // patron memo tag. Guarded by lastSeen so an out-of-order/late cancel
+    // can't clobber a newer, still-valid subscription.
+    if (isRecurrentTransferOp(opName) && amount === 0) {
+      const existing = this._byAccount.get(from);
+      if (!existing || timestamp >= existing.lastSeen) {
+        this._byAccount.delete(from);
+      }
+      return;
+    }
+
+    if (!memo || !memo.includes(PATRON_MEMO_TAG)) return;
     if (!Number.isFinite(amount)) return;
     if (!String(amountStr).toUpperCase().includes('HBD')) return;
 

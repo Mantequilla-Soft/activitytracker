@@ -138,7 +138,7 @@ describe('extractPatronTransfers', () => {
     ]);
     const transfers = extractPatronTransfers(block);
     expect(transfers).toEqual([
-      { from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron', timestamp: Date.parse('2024-01-01T00:00:00Z') },
+      { from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron', timestamp: Date.parse('2024-01-01T00:00:00Z'), opName: 'transfer' },
     ]);
   });
 
@@ -149,6 +149,7 @@ describe('extractPatronTransfers', () => {
     const transfers = extractPatronTransfers(block);
     expect(transfers.length).toBe(1);
     expect(transfers[0].from).toBe('alice');
+    expect(transfers[0].opName).toBe('recurrent_transfer');
   });
 
   test('object-form (HF26-suffixed) transfer_operation yields a transfer', () => {
@@ -157,7 +158,7 @@ describe('extractPatronTransfers', () => {
     ]);
     const transfers = extractPatronTransfers(block);
     expect(transfers.length).toBe(1);
-    expect(transfers[0]).toEqual({ from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron', timestamp: Date.parse('2024-01-01T00:00:00Z') });
+    expect(transfers[0]).toEqual({ from: 'alice', to: 'snapie', amount: '5.000 HBD', memo: 'snapiepatron', timestamp: Date.parse('2024-01-01T00:00:00Z'), opName: 'transfer_operation' });
   });
 
   test('object-form (HF26-suffixed) recurrent_transfer_operation yields a transfer', () => {
@@ -167,6 +168,7 @@ describe('extractPatronTransfers', () => {
     const transfers = extractPatronTransfers(block);
     expect(transfers.length).toBe(1);
     expect(transfers[0].from).toBe('alice');
+    expect(transfers[0].opName).toBe('recurrent_transfer_operation');
   });
 
   test('a vote op (no to/amount) is ignored', () => {
