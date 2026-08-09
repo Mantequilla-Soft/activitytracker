@@ -258,7 +258,7 @@ async function coldStartFeedIndex(client, feedIndex, sourcesConfig = SOURCES) {
 // permlink is new (prepend) or unchanged (re-check the growing head), the
 // same fetchContainerReplies + upsertContainer path handles both spec
 // requirements ("detect a newer container" and "re-check the current head").
-async function pollFeedIndex(client, feedIndex, failures = { snap: 0, wave: 0 }, sourcesConfig = SOURCES) {
+async function pollFeedIndex(client, feedIndex, failures = { snap: 0, wave: 0 }, sourcesConfig = SOURCES, state = null) {
   for (const source of sourcesConfig) {
     try {
       const list = await fetchContainerList(client, source.author, {
@@ -296,11 +296,16 @@ async function pollFeedIndex(client, feedIndex, failures = { snap: 0, wave: 0 },
       }
     }
   }
+  // Marks this cycle as having attempted every source (success or handled
+  // failure) — see the matching comment in poller.js's tick(). A source whose
+  // RPC call hangs mid-await never reaches its catch block, so the loop never
+  // gets here and the watchdog in index.js sees a growing staleness gap.
+  if (state) state.lastFeedTickCompletedAt = Date.now();
 }
 
-function startFeedPollLoop(client, feedIndex) {
+function startFeedPollLoop(client, feedIndex, state = null) {
   const failures = { snap: 0, wave: 0 };
-  return setInterval(() => pollFeedIndex(client, feedIndex, failures), FEED_POLL_INTERVAL_MS);
+  return setInterval(() => pollFeedIndex(client, feedIndex, failures, SOURCES, state), FEED_POLL_INTERVAL_MS);
 }
 
 module.exports = {

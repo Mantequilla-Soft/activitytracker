@@ -193,6 +193,12 @@ function startPollLoop(client, window, state, snapLog, authorTally, patronSubs) 
           console.log(`[hive-sidecar] Node refresh also failed: ${refreshErr.message}`);
         }
       }
+    } finally {
+      // Marks this tick as having run to completion (success or handled
+      // failure) — the watchdog in index.js compares wall-clock time against
+      // this to detect a tick that hung mid-await and never reached either
+      // branch above, which a plain "process is still running" check can't see.
+      state.lastBlockTickCompletedAt = Date.now();
     }
   };
 
