@@ -1,6 +1,11 @@
 'use strict';
 
+const path = require('path');
+const { loadJsonState, saveJsonState } = require('./state-store');
+
 const FEED_POLL_INTERVAL_MS = parseInt(process.env.FEED_POLL_INTERVAL_MS ?? '120000', 10); // 2 min
+const FEED_INDEX_STATE_FILE = process.env.FEED_INDEX_STATE_FILE
+  ?? path.join(__dirname, 'data', 'feed-index-state.json');
 const MAX_INDEXED_CONTAINERS_PER_SOURCE = parseInt(process.env.MAX_INDEXED_CONTAINERS_PER_SOURCE ?? '14', 10);
 const MAX_CONTAINERS_PER_FALLBACK_WALK = parseInt(process.env.MAX_CONTAINERS_PER_FALLBACK_WALK ?? '30', 10);
 const SNAP_CONTAINER_AUTHOR = process.env.SNAP_CONTAINER_AUTHOR ?? 'peak.snaps';
@@ -109,15 +114,41 @@ class FeedIndex {
     maxFallbackContainers = MAX_CONTAINERS_PER_FALLBACK_WALK,
     sources = SOURCES,
     fallbackWalkFn = fallbackWalk,
+    stateFile = FEED_INDEX_STATE_FILE,
   } = {}) {
     this._maxContainersPerSource = maxContainersPerSource;
     this._maxFallbackContainers = maxFallbackContainers;
     this._sources = sources;
     this._fallbackWalkFn = fallbackWalkFn;
+    this._stateFile = stateFile;
     // sourceKey -> container[] (newest-first)
     this._containers = new Map(sources.map(s => [s.key, []]));
     // sourceKey -> true once a fallback walk has confirmed there's no older history
     this._exhausted = new Map(sources.map(s => [s.key, false]));
+  }
+
+  // Restores the last known-good index from disk so /feed can serve real
+  // (if slightly stale) data immediately after a restart instead of the
+  // blank-until-cold-start-finishes response server.js falls back to —
+  // pm2 restarts this process on every deploy and every memory-limit hit,
+  // and each one used to mean 2-4 minutes of an empty feed for anyone
+  // loading the page in that window. Deliberately does NOT restore
+  // `_exhausted` — that flag means "confirmed no older history via a real
+  // RPC walk", which a disk load can't re-confirm on its own.
+  load() {
+    const saved = loadJsonState(this._stateFile);
+    if (!saved || typeof saved !== 'object' || !saved.containers) return;
+    for (const source of this._sources) {
+      const containers = saved.containers[source.key];
+      if (Array.isArray(containers)) this._containers.set(source.key, containers);
+    }
+  }
+
+  // Persists just the pointer index (author/permlink/created, not hydrated
+  // bodies) — cheap enough to call after every cold-start and poll-tick
+  // write rather than on a timer.
+  save() {
+    saveJsonState(this._stateFile, { containers: Object.fromEntries(this._containers) });
   }
 
   _containersFor(sourceKey) {
@@ -251,6 +282,10 @@ async function coldStartFeedIndex(client, feedIndex, sourcesConfig = SOURCES) {
       console.log(`[hive-sidecar] feed: ERROR cold-start walk failed for ${source.key} — ${err.message}`);
     }
   }
+  // Persist whatever came out of this pass (even a partial one — a source
+  // that failed above just keeps whatever load() restored from last time)
+  // so the next restart has this run's data to fall back on, not last run's.
+  feedIndex.save();
 }
 
 // Single tick: per source, a cheap limit=1 check for the newest container,
@@ -259,6 +294,7 @@ async function coldStartFeedIndex(client, feedIndex, sourcesConfig = SOURCES) {
 // same fetchContainerReplies + upsertContainer path handles both spec
 // requirements ("detect a newer container" and "re-check the current head").
 async function pollFeedIndex(client, feedIndex, failures = { snap: 0, wave: 0 }, sourcesConfig = SOURCES, state = null) {
+  let changed = false;
   for (const source of sourcesConfig) {
     try {
       const list = await fetchContainerList(client, source.author, {
@@ -275,6 +311,7 @@ async function pollFeedIndex(client, feedIndex, failures = { snap: 0, wave: 0 },
       const isNew = feedIndex.upsertContainer(source.key, {
         permlink: entry.permlink, created: toIso(entry.created), items,
       });
+      changed = true;
       failures[source.key] = 0;
       if (isNew) {
         console.log(`[hive-sidecar] feed: indexed ${source.key} container ${entry.permlink} (${items.length} replies)`);
@@ -286,9 +323,9 @@ async function pollFeedIndex(client, feedIndex, failures = { snap: 0, wave: 0 },
         console.log(`[hive-sidecar] feed: 5 consecutive failures for ${source.key} — triggering node list refresh`);
         failures[source.key] = 0;
         try {
-          const { resolveNodes } = require('./hive-client');
+          const { resolveNodes, applyNodeRefresh } = require('./hive-client');
           const fresh = await resolveNodes();
-          client.updateNodes(fresh);
+          applyNodeRefresh(client, fresh);
           console.log(`[hive-sidecar] feed: node list refreshed: ${fresh.length} nodes`);
         } catch (refreshErr) {
           console.log(`[hive-sidecar] feed: node refresh also failed — ${refreshErr.message}`);
@@ -296,6 +333,7 @@ async function pollFeedIndex(client, feedIndex, failures = { snap: 0, wave: 0 },
       }
     }
   }
+  if (changed) feedIndex.save();
   // Marks this cycle as having attempted every source (success or handled
   // failure) — see the matching comment in poller.js's tick(). A source whose
   // RPC call hangs mid-await never reaches its catch block, so the loop never

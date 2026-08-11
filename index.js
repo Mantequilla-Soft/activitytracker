@@ -24,6 +24,25 @@ const WATCHDOG_CHECK_INTERVAL_MS = 30 * 1000;
 const BLOCK_POLL_STALL_MS = parseInt(process.env.BLOCK_POLL_STALL_MS ?? String(5 * 60 * 1000), 10);
 const FEED_POLL_STALL_MS = parseInt(process.env.FEED_POLL_STALL_MS ?? String(10 * 60 * 1000), 10);
 
+// dhive's retryingFetch has no absolute ceiling once a node returns an error
+// without a `.code` (e.g. a 502) — it can loop forever instead of honoring
+// the client's `timeout` option. That hangs coldStart()/coldStartFeedIndex()
+// mid-await, which is *before* startWatchdog() runs for the block side and
+// entirely outside the watchdog's reach for the feed side. These hard
+// ceilings turn that silent, permanent hang into a rejection so both paths
+// fail loud (block: process exits, pm2 restarts; feed: falls through to the
+// poll loop's own self-healing) instead of wedging state.warming forever.
+const COLD_START_TIMEOUT_MS = parseInt(process.env.COLD_START_TIMEOUT_MS ?? String(3 * 60 * 1000), 10);
+const FEED_COLD_START_TIMEOUT_MS = parseInt(process.env.FEED_COLD_START_TIMEOUT_MS ?? String(3 * 60 * 1000), 10);
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 const state = {
   warming: true,
   count: 0,
@@ -71,6 +90,11 @@ async function main() {
   // on top of patronSubs' restored state, so both must be loaded first.
   patronSubs.load();
   patronDelegations.load();
+  // Restore the last known-good feed index so /feed can serve real (if
+  // briefly stale) data through this restart's cold-start window instead of
+  // the blank response server.js falls back to while state.feedWarming is
+  // true — see feedIndex.load()'s comment for why this happens so often.
+  feedIndex.load();
 
   // Created before createServer — unlike the other route dependencies, the
   // /feed route needs a live client reference at request time.
@@ -82,7 +106,11 @@ async function main() {
   patronDelegations.sync(client);
   setInterval(() => patronDelegations.sync(client), DELEGATION_SYNC_INTERVAL_MS);
 
-  state.lastProcessedBlock = await coldStart(client, window, snapLog, authorTally, patronSubs);
+  state.lastProcessedBlock = await withTimeout(
+    coldStart(client, window, snapLog, authorTally, patronSubs),
+    COLD_START_TIMEOUT_MS,
+    'coldStart',
+  );
   state.count = window.size;
   state.updatedAt = new Date().toISOString();
   state.warming = false;
@@ -101,7 +129,7 @@ async function main() {
   // Independent RPC domain from the block-scan poller above — deliberately
   // not awaited before main() returns, so a slow/failed feed backfill can't
   // delay (or be delayed by) the block-scan warmup.
-  coldStartFeedIndex(client, feedIndex)
+  withTimeout(coldStartFeedIndex(client, feedIndex), FEED_COLD_START_TIMEOUT_MS, 'coldStartFeedIndex')
     .catch(err => console.error('[hive-sidecar] feed: cold-start failed — poll loop will self-heal', err))
     .finally(() => {
       state.feedWarming = false;

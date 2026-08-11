@@ -75,7 +75,14 @@ function createServer(state, snapLog, authorTally, patronSubs, patronDelegations
 
   app.get('/feed', async (req, res) => {
     if (!feedIndex || !client) return res.json({ items: [], hasMore: false });
-    if (state.feedWarming) return res.json({ items: [], hasMore: true });
+    // While still warming, serve whatever feedIndex.load() restored from the
+    // last run rather than an unconditional blank page — real (if briefly
+    // stale) data beats nothing for anyone loading the page during the
+    // 2-4 minute cold-start window after a restart. Only the genuinely
+    // first-ever-run case (nothing on disk yet) still returns blank.
+    if (state.feedWarming && feedIndex.newestIndexed === null) {
+      return res.json({ items: [], hasMore: true });
+    }
 
     const before = req.query.before ? String(req.query.before) : undefined;
     const requested = parseInt(req.query.limit, 10);

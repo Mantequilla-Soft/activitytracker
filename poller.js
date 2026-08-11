@@ -185,9 +185,9 @@ function startPollLoop(client, window, state, snapLog, authorTally, patronSubs) 
         console.log('[hive-sidecar] 5 consecutive failures — triggering node list refresh');
         consecutiveFailures = 0;
         try {
-          const { resolveNodes } = require('./hive-client');
+          const { resolveNodes, applyNodeRefresh } = require('./hive-client');
           const fresh = await resolveNodes();
-          client.updateNodes(fresh);
+          applyNodeRefresh(client, fresh);
           console.log(`[hive-sidecar] Node list refreshed: ${fresh.length} nodes`);
         } catch (refreshErr) {
           console.log(`[hive-sidecar] Node refresh also failed: ${refreshErr.message}`);
