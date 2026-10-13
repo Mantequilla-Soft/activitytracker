@@ -180,9 +180,24 @@ async function hydrateOne(client, p) {
   };
 }
 
+// Bounded concurrency: firing a whole page (up to 50) of get_content calls at
+// once trips api.hive.blog's per-IP rate limit (HTTP 429), and dhive's
+// backoff/failover on those 429s is what made pages take 5-10s. A handful of
+// workers keeps a page at ~1-2s without hammering the node.
+const HYDRATE_CONCURRENCY = parseInt(process.env.FEED_HYDRATE_CONCURRENCY ?? '6', 10);
+
 async function hydrateItems(client, pointers) {
-  const hydrated = await Promise.all(pointers.map(p => hydrateOne(client, p)));
-  return hydrated.filter(Boolean);
+  const results = new Array(pointers.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < pointers.length) {
+      const i = next++;
+      results[i] = await hydrateOne(client, pointers[i]);
+    }
+  };
+  const workers = Math.min(HYDRATE_CONCURRENCY, pointers.length);
+  await Promise.all(Array.from({ length: workers }, worker));
+  return results.filter(Boolean);
 }
 
 // Pure in-memory pointer index. No client dependency of its own — RPC calls
