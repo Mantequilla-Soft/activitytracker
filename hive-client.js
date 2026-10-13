@@ -1,6 +1,7 @@
 'use strict';
 
 const { Client } = require('@hiveio/dhive');
+const { hedgedRpc } = require('./rpc-hedge');
 
 const BEACON_API_URL = process.env.BEACON_API_URL ?? 'https://beacon.peakd.com/api/nodes';
 const MIN_NODE_SCORE = parseInt(process.env.MIN_NODE_SCORE ?? '80', 10);
@@ -79,6 +80,15 @@ async function createHiveClient() {
   // every call, so replacing this own property (shadowing the prototype
   // method) is enough to cover every API call made through this client.
   const originalCall = client.call.bind(client);
+  // Reads go through hedgedRpc (see rpc-hedge.js) so one stuck or
+  // rate-limited node can't stall a call; broadcasts, and the degenerate
+  // single-node case, keep dhive's own path.
+  const dispatch = (api, method, params) => {
+    const nodes = Array.isArray(client.address) ? client.address.filter(n => typeof n === 'string') : [];
+    const isBroadcast = api === 'network_broadcast_api' || String(method).startsWith('broadcast_transaction');
+    if (isBroadcast || nodes.length < 2) return originalCall(api, method, params);
+    return hedgedRpc(nodes, api, method, params);
+  };
   client.call = (api, method, params) => {
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -87,7 +97,7 @@ async function createHiveClient() {
         RPC_CALL_TIMEOUT_MS,
       );
     });
-    return Promise.race([originalCall(api, method, params), timeout]).finally(() => clearTimeout(timer));
+    return Promise.race([dispatch(api, method, params), timeout]).finally(() => clearTimeout(timer));
   };
 
   setInterval(async () => {

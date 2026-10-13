@@ -111,67 +111,9 @@ function clearHydrateCache() {
   hydrateInflight.clear();
 }
 
-const HEDGE_DELAY_MS = parseInt(process.env.FEED_HYDRATE_HEDGE_MS ?? '900', 10);
-const HEDGE_MAX_NODES = 3;
-const NODE_REQUEST_TIMEOUT_MS = 3500;
-let nodeRotation = 0;
-
-// Hedged get_content straight over JSON-RPC: start on one node, and if it has
-// not answered after HEDGE_DELAY_MS start the same call on the next node, up
-// to HEDGE_MAX_NODES; the first valid answer wins. dhive's own failover only
-// kicks in after a full timeout on the stuck node, which is what turned one
-// hung or rate-limited node (api.hive.blog answers 429 under load) into
-// 5-10s pages. The starting node rotates so no single node takes every call.
-function hedgedGetContent(nodes, author, permlink) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ jsonrpc: '2.0', method: 'condenser_api.get_content', params: [author, permlink], id: 1 });
-    const start = nodeRotation++ % nodes.length;
-    const controllers = [];
-    let launched = 0;
-    let failed = 0;
-    let settled = false;
-    let timer = null;
-    const finish = (fn, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      controllers.forEach(c => c.abort());
-      fn(value);
-    };
-    const launch = () => {
-      if (settled || launched >= Math.min(HEDGE_MAX_NODES, nodes.length)) return;
-      const node = nodes[(start + launched) % nodes.length];
-      launched++;
-      const ctrl = new AbortController();
-      controllers.push(ctrl);
-      const kill = setTimeout(() => ctrl.abort(), NODE_REQUEST_TIMEOUT_MS);
-      fetch(node, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: ctrl.signal })
-        .then(r => (r.ok ? r.json() : Promise.reject(new Error(`${node} responded ${r.status}`))))
-        .then(j => {
-          if (j && j.result !== undefined && !j.error) return finish(resolve, j.result);
-          throw new Error(`${node} rpc error`);
-        })
-        .catch(err => {
-          if (settled) return;
-          failed++;
-          if (failed >= launched) {
-            if (launched < Math.min(HEDGE_MAX_NODES, nodes.length)) launch();
-            else finish(reject, err);
-          }
-        })
-        .finally(() => clearTimeout(kill));
-      if (launched < Math.min(HEDGE_MAX_NODES, nodes.length)) {
-        clearTimeout(timer);
-        timer = setTimeout(launch, HEDGE_DELAY_MS);
-      }
-    };
-    launch();
-  });
-}
-
+// get_content goes through client.database.call, which hive-client.js
+// routes via the hedged JSON-RPC layer (rpc-hedge.js).
 async function rpcGetContent(client, author, permlink) {
-  const nodes = Array.isArray(client.address) ? client.address.filter(n => typeof n === 'string') : [];
-  if (nodes.length >= 2) return hedgedGetContent(nodes, author, permlink);
   return client.database.call('get_content', [author, permlink]);
 }
 
