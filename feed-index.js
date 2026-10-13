@@ -78,28 +78,110 @@ async function fallbackWalk(client, source, beforeIso, maxContainers = MAX_CONTA
   return walkContainers(client, source, beforeIso, maxContainers);
 }
 
-async function hydrateItems(client, pointers) {
-  const hydrated = await Promise.all(pointers.map(async (p) => {
-    try {
-      const content = await client.database.call('get_content', [p.author, p.permlink]);
-      if (!content || !content.author) return null;
-      return {
-        source: p.source,
-        author: p.author,
-        permlink: p.permlink,
-        created: p.created,
-        parentAuthor: p.parentAuthor,
-        parentPermlink: p.parentPermlink,
-        body: content.body,
-        json_metadata: content.json_metadata,
-        active_votes: content.active_votes,
-        children: content.children,
-      };
-    } catch (err) {
-      console.log(`[hive-sidecar] feed: ERROR hydrating ${p.author}/${p.permlink} — ${err.message}`);
-      return null;
+// Hydrated-item cache. Every /feed request used to fire one get_content RPC
+// per item, uncached — with slow Hive nodes a deep page took 5-10s and the
+// whole page was lost to one slow call. Items change slowly (votes drift),
+// so a short TTL absorbs repeat/concurrent readers, and a stale entry is
+// still better than dropping the item when the RPC fails.
+const HYDRATE_TTL_MS = parseInt(process.env.FEED_HYDRATE_TTL_MS ?? '60000', 10);
+const HYDRATE_STALE_MAX_MS = parseInt(process.env.FEED_HYDRATE_STALE_MAX_MS ?? '3600000', 10);
+const HYDRATE_ITEM_DEADLINE_MS = parseInt(process.env.FEED_HYDRATE_ITEM_DEADLINE_MS ?? '4000', 10);
+const HYDRATE_CACHE_MAX = parseInt(process.env.FEED_HYDRATE_CACHE_MAX ?? '2000', 10);
+const hydrateCache = new Map(); // key -> { at, content }   (insertion order = LRU order)
+const hydrateInflight = new Map(); // key -> Promise<content|null>
+
+function cacheGet(key) {
+  const entry = hydrateCache.get(key);
+  if (!entry) return null;
+  hydrateCache.delete(key); // refresh recency
+  hydrateCache.set(key, entry);
+  return entry;
+}
+
+function cacheSet(key, content) {
+  hydrateCache.delete(key);
+  hydrateCache.set(key, { at: Date.now(), content });
+  while (hydrateCache.size > HYDRATE_CACHE_MAX) {
+    hydrateCache.delete(hydrateCache.keys().next().value);
+  }
+}
+
+function clearHydrateCache() {
+  hydrateCache.clear();
+  hydrateInflight.clear();
+}
+
+// Fetches get_content once, shared by concurrent callers, retrying a failed
+// call once (dhive rotates to the next node on error). The result is written
+// to the cache even if the caller's deadline already passed, so the next
+// request finds it warm.
+function fetchContent(client, key, author, permlink) {
+  let inflight = hydrateInflight.get(key);
+  if (inflight) return inflight;
+  inflight = (async () => {
+    let lastErr;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const content = await client.database.call('get_content', [author, permlink]);
+        if (content && content.author) {
+          cacheSet(key, content);
+          return content;
+        }
+        return null; // legitimately absent (deleted/never existed)
+      } catch (err) {
+        lastErr = err;
+      }
     }
-  }));
+    throw lastErr;
+  })().finally(() => hydrateInflight.delete(key));
+  hydrateInflight.set(key, inflight);
+  return inflight;
+}
+
+function withDeadline(promise, ms) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`hydration deadline ${ms}ms exceeded`)), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+async function hydrateOne(client, p) {
+  const key = `${p.author}/${p.permlink}`;
+  const cached = cacheGet(key);
+  const now = Date.now();
+  let content = null;
+  if (cached && now - cached.at < HYDRATE_TTL_MS) {
+    content = cached.content;
+  } else {
+    try {
+      content = await withDeadline(fetchContent(client, key, p.author, p.permlink), HYDRATE_ITEM_DEADLINE_MS);
+    } catch (err) {
+      if (cached && now - cached.at < HYDRATE_STALE_MAX_MS) {
+        content = cached.content; // stale beats missing
+      } else {
+        console.log(`[hive-sidecar] feed: ERROR hydrating ${p.author}/${p.permlink} — ${err.message}`);
+        return null;
+      }
+    }
+  }
+  if (!content || !content.author) return null;
+  return {
+    source: p.source,
+    author: p.author,
+    permlink: p.permlink,
+    created: p.created,
+    parentAuthor: p.parentAuthor,
+    parentPermlink: p.parentPermlink,
+    body: content.body,
+    json_metadata: content.json_metadata,
+    active_votes: content.active_votes,
+    children: content.children,
+  };
+}
+
+async function hydrateItems(client, pointers) {
+  const hydrated = await Promise.all(pointers.map(p => hydrateOne(client, p)));
   return hydrated.filter(Boolean);
 }
 
@@ -353,6 +435,7 @@ module.exports = {
   buildPointerRecords,
   fallbackWalk,
   hydrateItems,
+  clearHydrateCache,
   coldStartFeedIndex,
   pollFeedIndex,
   startFeedPollLoop,

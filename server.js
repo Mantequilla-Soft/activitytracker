@@ -93,7 +93,15 @@ function createServer(state, snapLog, authorTally, patronSubs, patronDelegations
     try {
       const { items: pointers, hasMore } = await feedIndex.getPage(client, { before, limit });
       const items = await hydrateItems(client, pointers);
-      res.json({ items, hasMore });
+      // `before` is the last *selected* pointer, so a client can advance its
+      // cursor past items that failed to hydrate instead of re-requesting or
+      // silently skipping them.
+      if (pointers.length > 0 && items.length === 0) {
+        // Every item failed to hydrate: an upstream outage, not an empty feed.
+        return res.status(502).json({ items: [], hasMore: true });
+      }
+      const nextBefore = pointers.length ? pointers[pointers.length - 1].created : undefined;
+      res.json({ items, hasMore, before: nextBefore });
     } catch (err) {
       console.log(`[hive-sidecar] feed: ERROR /feed request failed — ${err.message}`);
       res.status(502).json({ items: [], hasMore: false });
